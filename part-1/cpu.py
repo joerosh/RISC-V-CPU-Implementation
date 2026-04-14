@@ -63,6 +63,7 @@ funct7         = ""
 alu_ctrl       = 0b0000  # 4-bit ALU control code
 alu_result     = 0     # output of ALU
 mem_data       = 0     # data read from d_mem (lw)
+mem_update_msg = ""
  
 # RISC-V opcode constants
 OP_R      = "0110011"
@@ -104,13 +105,13 @@ def Fetch():
     current_instr = instructions[instr_index].strip()
     next_pc = pc + 4
  
-    # The branch mux lives conceptually in Fetch (it updates pc for next cycle).
-    # We apply it AFTER Execute has set branch_target and alu_zero.
-    # On the very first call Execute hasn't run yet so Branch=0 → safe.
-    if Branch and alu_zero:
-        pc = branch_target
-    else:
-        pc = next_pc
+    # # The branch mux lives conceptually in Fetch (it updates pc for next cycle).
+    # # We apply it AFTER Execute has set branch_target and alu_zero.
+    # # On the very first call Execute hasn't run yet so Branch=0 → safe.
+    # if Branch and alu_zero:
+    #     pc = branch_target
+    # else:
+    #     pc = next_pc
  
     return True
  
@@ -252,8 +253,8 @@ def Decode():
         b30_25 = slice_bits(instr, 30, 25)
         b11_8  = slice_bits(instr, 11, 8)
         b7     = slice_bits(instr, 7, 7)
-        raw    = bits_as_int(b31 + b7 + b30_25 + b11_8 + "0")  # 13 bits, bit0=0
-        imm_val = sign_extend(raw, 13)
+        raw    = bits_as_int(b31 + b7 + b30_25 + b11_8)  # 12-bit branch immediate before implicit low-order 0
+        imm_val = sign_extend(raw, 12)
  
     else:
         imm_val = 0   # R-type needs no immediate
@@ -299,11 +300,11 @@ def Execute():
     # 1-bit zero flag
     alu_zero = 1 if alu_result == 0 else 0
  
-    # Branch target: current_pc + (imm << 1)
-    # current_pc = next_pc - 4  (next_pc was set in Fetch)
-    current_pc    = next_pc - 4
+    # Branch target = current PC + (branch immediate << 1)
+    # imm_val does NOT include the implied low-order 0, so shift-left-1 restores byte offset.
+    current_pc = next_pc - 4
     branch_target = current_pc + (imm_val << 1)
- 
+
  
 # ─────────────────────────────────────────────
 # Mem
@@ -316,9 +317,10 @@ def Mem():
                               address 0x04 → d_mem[1], etc.
     ALU result holds the byte address.
     """
-    global mem_data
+    global mem_data, mem_update_msg
  
     mem_data = 0   # reset each cycle
+    mem_update_msg = ""
  
     if MemRead:
         # lw: read word at alu_result
@@ -329,7 +331,8 @@ def Mem():
         # sw: write rs2_val to alu_result
         mem_index          = alu_result // 4
         d_mem[mem_index]   = rs2_val
-        print(f"memory 0x{alu_result:X} is modified to 0x{rs2_val:X}")
+        mem_update_msg = f"memory 0x{alu_result:X} is modified to 0x{rs2_val:X}"
+        # print(f"memory 0x{alu_result:X} is modified to 0x{rs2_val:X}")
  
  
 # ─────────────────────────────────────────────
@@ -343,7 +346,7 @@ def Writeback():
     rf[0] is hardwired to 0 and never modified.
     Increments total_clock_cycles and prints cycle summary.
     """
-    global total_clock_cycles
+    global total_clock_cycles, pc, next_pc, branch_target, Branch, alu_zero, mem_update_msg
  
     total_clock_cycles += 1
     print(f"total_clock_cycles {total_clock_cycles} :")
@@ -353,7 +356,15 @@ def Writeback():
         rf[rd_idx] = write_val
         reg_name   = f"x{rd_idx}"
         print(f"{reg_name} is modified to 0x{write_val & 0xFFFFFFFF:X}")
- 
+    
+    if mem_update_msg:
+        print(mem_update_msg)
+
+    if Branch and alu_zero:
+        pc = branch_target
+    else:
+        pc = next_pc
+
     print(f"pc is modified to 0x{pc:X}")
  
  
@@ -362,7 +373,7 @@ def Writeback():
 # ─────────────────────────────────────────────
  
 def main():
-    global pc, rf, d_mem, branch_target, alu_zero, total_clock_cycles
+    global pc, rf, d_mem, branch_target, alu_zero, total_clock_cycles, mem_update_msg
  
     # ── Initial register values (as specified in the project) ──
     rf[1]  = 0x20   # x1
