@@ -90,11 +90,11 @@ instructions = []
  
 def Fetch():
     """
-    Read the instruction at address 'pc' from the instruction list.
-    pc is a byte address; instruction i lives at byte address 4*i.
-    After reading, compute next_pc = pc + 4, then decide the real
-    next pc: branch_target if (Branch AND alu_zero), else next_pc.
-    Updates the global 'pc' for the following cycle.
+    Fetch the instruction at the current PC from the instruction list.
+    PC is a byte address, so instruction index = pc // 4.
+    Also computes next_pc = pc + 4.
+    The actual PC update for the next cycle is performed later in Writeback(),
+    after Execute has determined whether a branch is taken.
     """
     global pc, next_pc, current_instr
  
@@ -332,7 +332,6 @@ def Mem():
         mem_index          = alu_result // 4
         d_mem[mem_index]   = rs2_val
         mem_update_msg = f"memory 0x{alu_result:X} is modified to 0x{rs2_val:X}"
-        # print(f"memory 0x{alu_result:X} is modified to 0x{rs2_val:X}")
  
  
 # ─────────────────────────────────────────────
