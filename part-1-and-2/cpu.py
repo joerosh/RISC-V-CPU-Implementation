@@ -1,6 +1,6 @@
 # cpu.py
 # CSE 140 Project – Part 1: Single-Cycle RISC-V CPU Simulator
-# Supports: lw, sw, add, addi, sub, and, andi, or, ori, beq
+# Supports: lw, sw, add, addi, sub, and, andi, or, ori, beq, jal, jalr
 #
 # Reuses decode logic from HW3 (JoeSamuelRosh_NoahElliott.py)
  
@@ -64,6 +64,13 @@ alu_ctrl       = 0b0000  # 4-bit ALU control code
 alu_result     = 0     # output of ALU
 mem_data       = 0     # data read from d_mem (lw)
 mem_update_msg = ""
+
+# -- For JAL and JALR implementation --
+Jump            = 0   # 1 for jal/jalr
+JumpReg         = 0   # 1 for jalr, 0 for jal
+pc_plus_4       = 0   # value to write into rd
+jump_target     = 0   # computed jump destination
+use_abi_names   = False   # set to True to display register names (s0, a0, etc.) instead of x0, x1, etc.
  
 # RISC-V opcode constants
 OP_R      = "0110011"
@@ -71,6 +78,8 @@ OP_IMM    = "0010011"
 OP_LOAD   = "0000011"
 OP_STORE  = "0100011"
 OP_BRANCH = "1100011"
+OP_JAL    = "1101111"
+OP_JALR   = "1100111"
  
 # RISC-V register ABI names (for display)
 REG_NAMES = [
@@ -96,7 +105,7 @@ def Fetch():
     The actual PC update for the next cycle is performed later in Writeback(),
     after Execute has determined whether a branch is taken.
     """
-    global pc, next_pc, current_instr
+    global pc, next_pc, current_instr, pc_plus_4
  
     instr_index = pc // 4
     if instr_index >= len(instructions):
@@ -104,6 +113,7 @@ def Fetch():
  
     current_instr = instructions[instr_index].strip()
     next_pc = pc + 4
+    pc_plus_4 = next_pc   # for jal/jalr
  
     # # The branch mux lives conceptually in Fetch (it updates pc for next cycle).
     # # We apply it AFTER Execute has set branch_target and alu_zero.
@@ -134,12 +144,13 @@ def ControlUnit(opcode: str):
       (beq uses SUB to compute rs1-rs2; zero flag signals equality)
     """
     global RegWrite, ALUSrc, MemRead, MemWrite, MemToReg, Branch, ALUOp
-    global alu_ctrl
+    global alu_ctrl, Jump, JumpReg
  
     # Reset all signals each cycle
     RegWrite = ALUSrc = MemRead = MemWrite = MemToReg = Branch = 0
     ALUOp    = 0b00
     alu_ctrl = 0b0010   # default ADD
+    Jump = JumpReg = 0
  
     if opcode == OP_R:
         # R-type: add, sub, and, or
@@ -175,6 +186,19 @@ def ControlUnit(opcode: str):
         Branch   = 1
         ALUOp    = 0b01
         alu_ctrl = 0b0110   # SUB (rs1 - rs2; zero → branch taken)
+
+    elif opcode == OP_JAL:
+        RegWrite = 1
+        Jump = 1
+        JumpReg = 0
+        alu_ctrl = 0b0010   # ADD (for computing jump target, though it's not used in Execute for JAL)
+
+    elif opcode == OP_JALR:
+        RegWrite = 1
+        ALUSrc = 1
+        Jump = 1
+        JumpReg = 1
+        alu_ctrl = 0b0010   # ADD (for computing jump target)
  
  
 def resolve_alu_ctrl():
@@ -255,6 +279,18 @@ def Decode():
         b7     = slice_bits(instr, 7, 7)
         raw    = bits_as_int(b31 + b7 + b30_25 + b11_8)  # 12-bit branch immediate before implicit low-order 0
         imm_val = sign_extend(raw, 12)
+    
+    elif opcode_bits == OP_JAL:
+        b31    = slice_bits(instr, 31, 31)
+        b19_12 = slice_bits(instr, 19, 12)
+        b20    = slice_bits(instr, 20, 20)
+        b30_21 = slice_bits(instr, 30, 21)
+        raw    = bits_as_int(b31 + b19_12 + b20 + b30_21)
+        imm_val = sign_extend(raw, 20)
+    
+    elif opcode_bits == OP_JALR:
+        raw = bits_as_int(slice_bits(instr, 31, 20))
+        imm_val = sign_extend(raw, 12)
  
     else:
         imm_val = 0   # R-type needs no immediate
@@ -281,7 +317,7 @@ def Execute():
  
     Sets alu_zero = 1 if result == 0.
     """
-    global alu_result, alu_zero, branch_target
+    global alu_result, alu_zero, branch_target, jump_target
  
     operand_a = rs1_val
     operand_b = imm_val if ALUSrc else rs2_val
@@ -305,6 +341,13 @@ def Execute():
     current_pc = next_pc - 4
     branch_target = current_pc + (imm_val << 1)
 
+    if Jump and not JumpReg:
+        # JAL
+        jump_target = current_pc + (imm_val << 1)
+        
+    elif Jump and JumpReg:
+        # JALR
+        jump_target = (rs1_val + imm_val) & ~1
  
 # ─────────────────────────────────────────────
 # Mem
@@ -346,20 +389,33 @@ def Writeback():
     Increments total_clock_cycles and prints cycle summary.
     """
     global total_clock_cycles, pc, next_pc, branch_target, Branch, alu_zero, mem_update_msg
- 
+    global Jump, JumpReg, pc_plus_4, jump_target
+
     total_clock_cycles += 1
+    if total_clock_cycles > 1:
+        print()  # print blank line before new cycle
     print(f"total_clock_cycles {total_clock_cycles} :")
  
     if RegWrite and rd_idx != 0:
-        write_val = mem_data if MemToReg else alu_result
+        if Jump:
+            write_val = pc_plus_4   # for jal/jalr, rd gets PC+4
+        else:
+            write_val = mem_data if MemToReg else alu_result
         rf[rd_idx] = write_val
-        reg_name   = f"x{rd_idx}"
+
+        if use_abi_names:
+            reg_name = REG_NAMES[rd_idx]
+        else:
+            reg_name = f"x{rd_idx}"
+
         print(f"{reg_name} is modified to 0x{write_val & 0xFFFFFFFF:X}")
     
     if mem_update_msg:
         print(mem_update_msg)
 
-    if Branch and alu_zero:
+    if Jump:
+        pc = jump_target
+    elif Branch and alu_zero:
         pc = branch_target
     else:
         pc = next_pc
@@ -372,17 +428,7 @@ def Writeback():
 # ─────────────────────────────────────────────
  
 def main():
-    global pc, rf, d_mem, branch_target, alu_zero, total_clock_cycles, mem_update_msg
- 
-    # ── Initial register values (as specified in the project) ──
-    rf[1]  = 0x20   # x1
-    rf[2]  = 0x5    # x2
-    rf[10] = 0x70   # x10
-    rf[11] = 0x4    # x11
- 
-    # ── Initial data memory values ──
-    d_mem[0x70 // 4] = 0x5    # address 0x70 → d_mem[28]
-    d_mem[0x74 // 4] = 0x10   # address 0x74 → d_mem[29]
+    global pc, rf, d_mem, branch_target, alu_zero, total_clock_cycles, mem_update_msg, use_abi_names
  
     # ── Load program ──
     filename = input("Enter the program file name to run:\n").strip()
@@ -392,6 +438,25 @@ def main():
     except FileNotFoundError:
         print(f"Error: '{filename}' not found.")
         return
+    
+    rf[:] = [0] * 32
+    d_mem[:] = [0] * 32
+
+    use_abi_names = "part2" in filename
+
+    if "part2" in filename:
+        rf[8]  = 0x20   # s0
+        rf[10] = 0x5    # a0
+        rf[11] = 0x2    # a1
+        rf[12] = 0xA    # a2
+        rf[13] = 0xF    # a3
+    else:
+        rf[1]  = 0x20   # x1
+        rf[2]  = 0x5    # x2
+        rf[10] = 0x70   # x10
+        rf[11] = 0x4    # x11
+        d_mem[0x70 // 4] = 0x5
+        d_mem[0x74 // 4] = 0x10
  
     global instructions
     instructions = lines
