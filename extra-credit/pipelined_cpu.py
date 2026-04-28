@@ -111,6 +111,7 @@ class MEM_WB:
 
     alu_result: int = 0
     mem_data: int = 0
+    mem_msg: str = ""
 
     RegWrite: int = 0
     MemToReg: int = 0
@@ -251,7 +252,7 @@ def should_stall_decode() -> bool:
 
     # No forwarding: if a source register is waiting to be written by a still-active older instruction,
     # stall decode/fetch and inject a bubble into EX.
-    for older in (id_ex, ex_mem, mem_wb):
+    for older in (id_ex, ex_mem):
         if not older.valid:
             continue
 
@@ -282,13 +283,13 @@ def writeback_stage():
 
     completed_msg = {
         "reg_msg": "",
-        "mem_msg": "",
+        "mem_msg": mem_wb.mem_msg,
     }
 
     if mem_wb.RegWrite and mem_wb.rd_idx != 0:
         write_val = mem_wb.mem_data if mem_wb.MemToReg else mem_wb.alu_result
         rf[mem_wb.rd_idx] = write_val
-        completed_msg["reg_msg"] = f"{REG_NAMES[mem_wb.rd_idx]} is modified to 0x{write_val & 0xFFFFFFFF:X}"
+        completed_msg["reg_msg"] = f"x{mem_wb.rd_idx} is modified to 0x{write_val & 0xFFFFFFFF:X}"
 
     return completed_msg
 
@@ -298,14 +299,7 @@ def memory_stage(next_mem_wb: MEM_WB):
 
     if not ex_mem.valid:
         next_mem_wb.valid = False
-        return ""
-
-    next_mem_wb.valid = True
-    next_mem_wb.instr = ex_mem.instr
-    next_mem_wb.rd_idx = ex_mem.rd_idx
-    next_mem_wb.alu_result = ex_mem.alu_result
-    next_mem_wb.RegWrite = ex_mem.RegWrite
-    next_mem_wb.MemToReg = ex_mem.MemToReg
+        return
 
     mem_msg = ""
     mem_data = 0
@@ -319,8 +313,14 @@ def memory_stage(next_mem_wb: MEM_WB):
         d_mem[mem_index] = ex_mem.rs2_val
         mem_msg = f"memory 0x{ex_mem.alu_result:X} is modified to 0x{ex_mem.rs2_val:X}"
 
+    next_mem_wb.valid = True
+    next_mem_wb.instr = ex_mem.instr
+    next_mem_wb.rd_idx = ex_mem.rd_idx
+    next_mem_wb.alu_result = ex_mem.alu_result
     next_mem_wb.mem_data = mem_data
-    return mem_msg
+    next_mem_wb.mem_msg = mem_msg
+    next_mem_wb.RegWrite = ex_mem.RegWrite
+    next_mem_wb.MemToReg = ex_mem.MemToReg
 
 
 def execute_stage(next_ex_mem: EX_MEM):
@@ -365,7 +365,7 @@ def execute_stage(next_ex_mem: EX_MEM):
     # No branch prediction: resolve in EX, then redirect PC and flush younger instructions if taken
     if id_ex.Branch and zero:
         pc = branch_target
-        if_id.valid = False
+        # if_id.valid = False
         return True
 
     return False
@@ -503,7 +503,7 @@ def main():
         next_mem_wb = MEM_WB()
 
         wb_msg = writeback_stage()
-        mem_msg = memory_stage(next_mem_wb)
+        memory_stage(next_mem_wb)
         branch_taken = execute_stage(next_ex_mem)
         stall_decode = decode_stage(next_id_ex)
 
@@ -528,8 +528,8 @@ def main():
             print(f"total_clock_cycles {total_clock_cycles} :")
             if wb_msg["reg_msg"]:
                 print(wb_msg["reg_msg"])
-            if mem_msg:
-                print(mem_msg)
+            if wb_msg["mem_msg"]:
+                print(wb_msg["mem_msg"])
             print(f"pc is modified to 0x{pc:X}")
 
     print(f"\nprogram terminated:")
