@@ -1,2 +1,2 @@
-# Single-Cycle-RISC-V-CPU
-An implementation of a Pipileined RISC V CPU in Python.
+# RISC-V-CPU-Implementation
+An implementation of a Single Cycle and Pipelined RISC-V CPU in Python.
